@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Тест комнат MQTT (2 игрока)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Браузерный клиент MQTT over WebSockets -->
+    <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;700;900&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Rubik', sans-serif;
+            background-color: #0b1020;
+            color: #f8fafc;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #arenaCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        .card-glass {
+            background: rgba(15, 23, 42, 0.94);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+        }
+        .btn-press {
+            transition: transform 0.1s ease, filter 0.15s ease;
+        }
+        .btn-press:hover:not(:disabled) {
+            filter: brightness(1.07);
+        }
+        .btn-press:active:not(:disabled) {
+            transform: translateY(2px);
+        }
+        .btn-press:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        /* Сенсорный джойстик */
+        #joyBase {
+            position: fixed;
+            bottom: 24px;
+            left: 24px;
+            width: 120px;
+            height: 120px;
+            border-radius: 9999px;
+            background: rgba(30, 41, 59, 0.72);
+            border: 2px solid rgba(148, 163, 184, 0.35);
+            z-index: 25;
+            display: none;
+        }
+        #joyStick {
+            position: absolute;
+            top: 36px;
+            left: 36px;
+            width: 48px;
+            height: 48px;
+            border-radius: 9999px;
+            background: #f59e0b;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+            pointer-events: none;
+        }
+        @media (pointer: coarse) {
+            .mobile-only-ctrl {
+                display: block !important;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Холст комнаты проверки движения -->
+    <canvas id="arenaCanvas"></canvas>
+
+    <!-- Верхняя панель статуса в комнате -->
+    <div id="roomTopBar" class="hidden fixed top-0 left-0 right-0 p-3 flex flex-wrap items-center justify-between gap-2 z-20 pointer-events-none">
+        <div class="flex flex-wrap items-center gap-2 pointer-events-auto">
+            <div class="bg-slate-900/90 border border-white/15 px-3 py-2 rounded-2xl flex items-center gap-2 shadow-lg">
+                <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <span id="statusLabel" class="text-xs sm:text-sm font-bold text-slate-100">Подключение...</span>
+            </div>
+
+            <div class="bg-slate-900/90 border border-white/15 px-3 py-2 rounded-2xl flex items-center gap-2 shadow-lg">
+                <span class="text-xs text-slate-400">Код:</span>
+                <strong id="roomCodeBadge" class="text-sm sm:text-base font-black tracking-widest text-amber-400">----</strong>
+                <button id="btnCopyRoomCode" class="text-xs bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded-lg font-bold">📋</button>
+            </div>
+
+            <div class="bg-slate-900/90 border border-white/15 px-3 py-2 rounded-2xl text-xs font-bold text-emerald-400 shadow-lg">
+                Пинг: <span id="pingValue">--</span> мс
+            </div>
+        </div>
+
+        <div class="flex items-center gap-2 pointer-events-auto">
+            <button id="btnToggleDebug" class="btn-press bg-slate-800/95 hover:bg-slate-700 border border-white/15 px-3 py-2 rounded-2xl text-xs font-bold">
+                🪵 Лог
+            </button>
+            <button id="btnExitRoom" class="btn-press bg-rose-600/90 hover:bg-rose-600 px-3.5 py-2 rounded-2xl text-xs font-bold shadow-lg">
+                Выйти
+            </button>
+        </div>
+    </div>
+
+    <!-- Отладочный лог (сворачиваемый) -->
+    <div id="debugDrawer" class="hidden fixed top-16 right-3 w-[92vw] max-w-sm bg-slate-950/95 border border-slate-700 rounded-2xl p-3 z-30 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
+            <span class="text-xs font-black uppercase tracking-wider text-amber-400">Диагностика MQTT</span>
+            <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                <span>RX: <strong id="statRx" class="text-emerald-400">0</strong></span>
+                <span>TX: <strong id="statTx" class="text-sky-400">0</strong></span>
+                <button id="btnClearLog" class="text-rose-400 hover:underline ml-1">Очистить</button>
+            </div>
+        </div>
+        <div id="debugLogList" class="h-44 overflow-y-auto font-mono text-[11px] space-y-1 text-slate-300"></div>
+    </div>
+
+    <!-- Быстрый чат и кнопка "Мяу!" внизу экрана -->
+    <div id="roomBottomBar" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 w-[94vw] max-w-lg z-20 flex flex-col gap-2">
+        <div id="chatMessages" class="max-h-24 overflow-y-auto flex flex-col gap-1 px-1 pointer-events-none"></div>
+
+        <div class="flex items-center gap-2 bg-slate-900/95 border border-white/15 p-2 rounded-2xl shadow-xl">
+            <button id="btnMeowAction" class="btn-press bg-amber-500 hover:bg-amber-400 text-slate-950 font-black px-3.5 py-2 rounded-xl text-xs sm:text-sm shrink-0">
+                🐱 Мяу!
+            </button>
+            <input id="chatInput" type="text" maxlength="80" placeholder="Быстрое сообщение другу..."
+                class="flex-1 min-w-0 bg-slate-800 border border-white/10 rounded-xl px-3 py-2 text-xs sm:text-sm text-white focus:outline-none focus:border-amber-400">
+            <button id="btnSendChat" class="btn-press bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-3.5 py-2 rounded-xl text-xs sm:text-sm shrink-0">
+                Отпр.
+            </button>
+        </div>
+    </div>
+
+    <!-- Сенсорный джойстик для телефонов -->
+    <div id="joyBase" class="mobile-only-ctrl"><div id="joyStick"></div></div>
+
+    <!-- Тост-уведомление -->
+    <div id="toastBanner" class="fixed top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none transition-all duration-200 opacity-0 -translate-y-2 w-[90vw] max-w-md">
+        <div id="toastBannerText" class="bg-slate-900/95 border border-amber-400/70 text-amber-200 text-xs sm:text-sm font-bold px-4 py-2.5 rounded-2xl text-center shadow-2xl"></div>
+    </div>
+
+    <!-- ЭКРАН ЛОББИ -->
+    <div id="lobbyScreen" class="fixed inset-0 z-40 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto">
+        <div class="card-glass w-full max-w-md rounded-3xl p-5 sm:p-6 my-auto space-y-5">
+            <div class="text-center space-y-1">
+                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-emerald-300 text-[11px] font-bold">
+                    <span>📡</span> MQTT OVER WEBSOCKETS • ТЕСТ СВЯЗИ
+                </div>
+                <h1 class="text-2xl sm:text-3xl font-black tracking-tight">Комната на двоих</h1>
+                <p class="text-xs text-slate-400">Проверка входа по коду, реконнекта на телефоне и плавного движения</p>
+            </div>
+
+            <!-- Имя и цвет -->
+            <div class="bg-slate-900/80 border border-white/10 rounded-2xl p-4 space-y-3.5">
+                <div>
+                    <label class="block text-xs font-bold uppercase text-slate-400 mb-1">Твоё имя / ник</label>
+                    <input id="inputNick" type="text" maxlength="16" value="Игрок 1" placeholder="Введите ник..."
+                        class="w-full px-3.5 py-2.5 rounded-xl bg-slate-800 border border-white/15 text-white font-bold text-sm focus:outline-none focus:border-amber-400">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold uppercase text-slate-400 mb-1.5">Цвет круга / кота</label>
+                    <div id="colorPicker" class="grid grid-cols-5 gap-2">
+                        <button type="button" data-color="#f97316" class="color-opt h-10 rounded-xl bg-orange-500 ring-2 ring-white scale-105 transition" title="Оранжевый"></button>
+                        <button type="button" data-color="#38bdf8" class="color-opt h-10 rounded-xl bg-sky-400 opacity-75 hover:opacity-100 transition" title="Голубой"></button>
+                        <button type="button" data-color="#34d399" class="color-opt h-10 rounded-xl bg-emerald-400 opacity-75 hover:opacity-100 transition" title="Зелёный"></button>
+                        <button type="button" data-color="#f472b6" class="color-opt h-10 rounded-xl bg-pink-400 opacity-75 hover:opacity-100 transition" title="Розовый"></button>
+                        <button type="button" data-color="#a78bfa" class="color-opt h-10 rounded-xl bg-violet-400 opacity-75 hover:opacity-100 transition" title="Фиолетовый"></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Создать комнату -->
+            <div class="space-y-2.5">
+                <button id="btnCreateRoom" class="btn-press w-full py-3.5 px-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm sm:text-base shadow-lg">
+                    ✨ Создать комнату
+                </button>
+
+                <div id="createdCodeBox" class="hidden bg-slate-900 border border-amber-400/40 rounded-2xl p-3.5 text-center space-y-2">
+                    <div class="text-[11px] uppercase tracking-wider text-slate-400">Код комнаты создан</div>
+                    <div id="createdCodeValue" class="text-3xl font-black tracking-[0.28em] text-amber-400">ABCD</div>
+                    <div class="flex justify-center gap-2 pt-1">
+                        <button id="btnCopyCreated" class="btn-press px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold">
+                            📋 Копировать код
+                        </button>
+                        <button id="btnShareCreated" class="btn-press px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white">
+                            📤 Поделиться
+                        </button>
+                        <button id="btnEnterCreatedRoom" class="btn-press px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black">
+                            Войти →
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="relative flex items-center justify-center">
+                <div class="border-t border-slate-800 w-full"></div>
+                <span class="bg-slate-900 px-3 text-[11px] uppercase text-slate-500 font-bold">или</span>
+                <div class="border-t border-slate-800 w-full"></div>
+            </div>
+
+            <!-- Войти по коду -->
+            <div class="flex gap-2">
+                <input id="inputRoomCode" type="text" maxlength="4" placeholder="КОД"
+                    class="w-24 px-3 py-3 rounded-2xl bg-slate-800 border border-white/15 text-center font-black uppercase tracking-widest text-amber-300 focus:outline-none focus:border-amber-400">
+                <button id="btnJoinRoom" class="btn-press flex-1 py-3 px-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-sm sm:text-base shadow-lg">
+                    Войти в комнату
+                </button>
+            </div>
+
+            <!-- Общий статус подключения на экране лобби -->
+            <div class="flex items-center justify-between text-xs text-slate-400 pt-1">
+                <div class="flex items-center gap-2">
+                    <span id="lobbyConnDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+                    <span id="lobbyConnText">Готов к подключению</span>
+                </div>
+                <button id="btnLobbyLog" class="text-slate-400 hover:text-white underline">Лог</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // =========================================================================
+        // 1. КОНФИГУРАЦИЯ И СОСТОЯНИЕ
+        // =========================================================================
+        const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
+        const TOPIC_PREFIX = 'room-test-2p-v1/';
+        const SEND_INTERVAL_MS = 55; // ~18 раз в секунду
+
+        const appState = {
+            screen: 'lobby', // 'lobby' | 'room'
+            roomCode: '',
+            isCreator: false,
+            clientId: 'p_' + Math.random().toString(36).slice(2, 9),
+            myNick: 'Игрок 1',
+            myColor: '#f97316',
+            connected: false,
+            peerJoined: false,
+            pingMs: null,
+            lastPingSentAt: 0,
+            txCount: 0,
+            rxCount: 0,
+            lastPeerSeenAt: 0,
+            me: { x: 260, y: 260, vx: 0, vy: 0, meowAnim: 0 },
+            peer: {
+                id: null,
+                nick: 'Друг',
+                color: '#38bdf8',
+                x: 420,
+                y: 260,
+                targetX: 420,
+                targetY: 260,
+                meowAnim: 0,
+                online: false
+            },
+            popups: []
+        };
+
+        let mqttClient = null;
+        let posSendTimer = null;
+        let pingTimer = null;
+        let peerWatchTimer = null;
+
+        // =========================================================================
+        // 2. ЛОГИРОВАНИЕ И УВЕДОМЛЕНИЯ
+        // =========================================================================
+        function writeLog(text, level = 'info') {
+            const list = document.getElementById('debugLogList');
+            if (!list) return;
+            const now = new Date();
+            const ts = now.toTimeString().split(' ')[0];
+            const row = document.createElement('div');
+            const colorClass = level === 'err' ? 'text-rose-400' : level === 'ok' ? 'text-emerald-400' : 'text-slate-300';
+            row.className = colorClass;
+            row.textContent = `[${ts}] ${text}`;
+            list.appendChild(row);
+            if (list.children.length > 120) {
+                list.removeChild(list.firstChild);
+            }
+            list.scrollTop = list.scrollHeight;
+        }
+
+        function showToast(msg) {
+            const banner = document.getElementById('toastBanner');
+            const label = document.getElementById('toastBannerText');
+            label.textContent = msg;
+            banner.classList.remove('opacity-0', '-translate-y-2');
+            banner.classList.add('opacity-100', 'translate-y-0');
+            clearTimeout(showToast._t);
+            showToast._t = setTimeout(() => {
+                banner.classList.add('opacity-0', '-translate-y-2');
+                banner.classList.remove('opacity-100', 'translate-y-0');
+            }, 2600);
+        }
+
+        function updateStatsUI() {
+            document.getElementById('statTx').textContent = appState.txCount;
+            document.getElementById('statRx').textContent = appState.rxCount;
+            document.getElementById('pingValue').textContent = appState.pingMs !== null ? appState.pingMs : '--';
+        }
+
+        function updateConnectionStatusUI(modeText, dotColor = 'bg-amber-400') {
+            const dot = document.getElementById('statusDot');
+            const lbl = document.getElementById('statusLabel');
+            const lDot = document.getElementById('lobbyConnDot');
+            const lLbl = document.getElementById('lobbyConnText');
+
+            dot.className = `w-2.5 h-2.5 rounded-full ${dotColor}`;
+            lbl.textContent = modeText;
+            lDot.className = `w-2 h-2 rounded-full ${dotColor}`;
+            lLbl.textContent = modeText;
+        }
+
+        // =========================================================================
+        // 3. MQTT OVER WEBSOCKETS С АВТОРЕКОННЕКТОМ ДЛЯ МОБИЛЬНЫХ
+        // =========================================================================
+        function generateCode4() {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            let code = '';
+            for (let i = 0; i < 4; i++) {
+                code += chars[Math.floor(Math.random() * chars.length)];
+            }
+            return code;
+        }
+
+        function getRoomTopic() {
+            return TOPIC_PREFIX + appState.roomCode;
+        }
+
+        function publishPacket(payload) {
+            if (!mqttClient || !mqttClient.connected || !appState.roomCode) return;
+            try {
+                const msg = JSON.stringify({
+                    ...payload,
+                    senderId: appState.clientId,
+                    nick: appState.myNick,
+                    color: appState.myColor,
+                    ts: Date.now()
+                });
+                mqttClient.publish(getRoomTopic(), msg, { qos: 0 });
+                appState.txCount += 1;
+                updateStatsUI();
+            } catch (err) {
+                writeLog('Ошибка отправки: ' + err.message, 'err');
+            }
+        }
+
+        function connectToRoom(code, isCreator = false) {
+            disconnectMqtt(false);
+
+            appState.roomCode = code.toUpperCase();
+            appState.isCreator = isCreator;
+            appState.peerJoined = false;
+            appState.peer.online = false;
+            appState.pingMs = null;
+
+            document.getElementById('roomCodeBadge').textContent = appState.roomCode;
+            updateConnectionStatusUI('Подключение...', 'bg-amber-400 animate-pulse');
+            writeLog(`Подключаемся к брокеру для комнаты ${appState.roomCode}...`);
+
+            if (typeof mqtt === 'undefined') {
+                writeLog('Библиотека MQTT не загрузилась. Проверьте интернет.', 'err');
+                showToast('Ошибка загрузки MQTT-клиента');
+                updateConnectionStatusUI('Ошибка библиотеки', 'bg-rose-500');
+                return;
+            }
+
+            const options = {
+                clientId: appState.clientId,
+                clean: true,
+                reconnectPeriod: 1200,
+                connectTimeout: 8000,
+                keepalive: 20
+            };
+
+            try {
+                mqttClient = mqtt.connect(BROKER_URL, options);
+            } catch (err) {
+                writeLog('Сбой mqtt.connect: ' + err.message, 'err');
+                updateConnectionStatusUI('Ошибка подключения', 'bg-rose-500');
+                return;
+            }
+
+            mqttClient.on('connect', () => {
+                appState.connected = true;
+                writeLog(`Подключено к брокеру. Подписка на ${getRoomTopic()}`, 'ok');
+
+                mqttClient.subscribe(getRoomTopic(), { qos: 0 }, (err) => {
+                    if (err) {
+                        writeLog('Ошибка подписки: ' + err.message, 'err');
+                        updateConnectionStatusUI('Ошибка канала', 'bg-rose-500');
+                        return;
+                    }
+                    if (!appState.peerJoined) {
+                        updateConnectionStatusUI('В сети / Ожидание друга', 'bg-emerald-400');
+                    }
+                    publishPacket({ type: 'hello' });
+                });
+            });
+
+            mqttClient.on('reconnect', () => {
+                appState.connected = false;
+                writeLog('Переподключение к MQTT...', 'info');
+                updateConnectionStatusUI('Переподключение...', 'bg-amber-400 animate-pulse');
+            });
+
+            mqttClient.on('offline', () => {
+                appState.connected = false;
+                writeLog('Сеть оффлайн (ожидание интернета)', 'err');
+                updateConnectionStatusUI('Нет сети (реконнект...)', 'bg-rose-500');
+            });
+
+            mqttClient.on('error', (err) => {
+                writeLog('MQTT ошибка: ' + (err && err.message ? err.message : 'unknown'), 'err');
+            });
+
+            mqttClient.on('message', (topic, rawPayload) => {
+                if (topic !== getRoomTopic()) return;
+                let data = null;
+                try {
+                    data = JSON.parse(rawPayload.toString());
+                } catch (e) {
+                    return;
+                }
+                if (!data || data.senderId === appState.clientId) return;
+
+                appState.rxCount += 1;
+                appState.lastPeerSeenAt = Date.now();
+                updateStatsUI();
+
+                handlePeerMessage(data);
+            });
+
+            startLoops();
+        }
+
+        function handlePeerMessage(data) {
+            const wasJoined = appState.peerJoined;
+            appState.peer.id = data.senderId;
+            appState.peer.nick = data.nick || 'Друг';
+            appState.peer.color = data.color || '#38bdf8';
+            appState.peer.online = true;
+            appState.peerJoined = true;
+
+            if (!wasJoined) {
+                updateConnectionStatusUI('Друг подключился!', 'bg-emerald-400');
+                showToast(`🎉 ${appState.peer.nick} в комнате!`);
+                writeLog(`Игрок "${appState.peer.nick}" (${data.senderId}) вошёл в комнату`, 'ok');
+                publishPacket({ type: 'hello_ack' });
+            } else if (appState.connected) {
+                updateConnectionStatusUI(`В сети с ${appState.peer.nick}`, 'bg-emerald-400');
+            }
+
+            if (data.type === 'hello') {
+                publishPacket({ type: 'hello_ack' });
+            } else if (data.type === 'pos') {
+                appState.peer.targetX = Number(data.x) || appState.peer.targetX;
+                appState.peer.targetY = Number(data.y) || appState.peer.targetY;
+            } else if (data.type === 'meow') {
+                appState.peer.meowAnim = 1.0;
+                addPopup(appState.peer.x, appState.peer.y - 42, 'МЯУ! 🐾', appState.peer.color);
+                appendChatLine(appState.peer.nick, '🐱 МЯУ!', appState.peer.color);
+                writeLog(`${appState.peer.nick} нажал МЯУ!`);
+            } else if (data.type === 'chat' && data.text) {
+                appendChatLine(appState.peer.nick, String(data.text).slice(0, 80), appState.peer.color);
+                addPopup(appState.peer.x, appState.peer.y - 42, String(data.text).slice(0, 22), '#f8fafc');
+            } else if (data.type === 'ping') {
+                publishPacket({ type: 'pong', pingId: data.pingId });
+            } else if (data.type === 'pong' && data.pingId === appState.lastPingSentAt) {
+                appState.pingMs = Math.max(1, Date.now() - data.pingId);
+                updateStatsUI();
+            } else if (data.type === 'bye') {
+                appState.peer.online = false;
+                appState.peerJoined = false;
+                updateConnectionStatusUI('Друг вышел из комнаты', 'bg-amber-400');
+                showToast(`${appState.peer.nick} вышел из комнаты`);
+                writeLog(`${appState.peer.nick} отправил сигнал выхода`);
+            }
+        }
+
+        function disconnectMqtt(sendBye = true) {
+            clearInterval(posSendTimer);
+            clearInterval(pingTimer);
+            clearInterval(peerWatchTimer);
+
+            if (sendBye && mqttClient && mqttClient.connected && appState.roomCode) {
+                publishPacket({ type: 'bye' });
+            }
+            if (mqttClient) {
+                try {
+                    mqttClient.end(true);
+                } catch (e) {}
+                mqttClient = null;
+            }
+            appState.connected = false;
+        }
+
+        function startLoops() {
+            clearInterval(posSendTimer);
+            clearInterval(pingTimer);
+            clearInterval(peerWatchTimer);
+
+            // Отправка позиции ~18 раз в секунду
+            posSendTimer = setInterval(() => {
+                if (appState.screen === 'room' && appState.connected) {
+                    publishPacket({
+                        type: 'pos',
+                        x: Math.round(appState.me.x),
+                        y: Math.round(appState.me.y)
+                    });
+                }
+            }, SEND_INTERVAL_MS);
+
+            // Проверка пинга каждые 2.5 сек
+            pingTimer = setInterval(() => {
+                if (appState.screen === 'room' && appState.connected && appState.peerJoined) {
+                    const now = Date.now();
+                    appState.lastPingSentAt = now;
+                    publishPacket({ type: 'ping', pingId: now });
+                }
+            }, 2500);
+
+            // Отслеживание потери активности друга
+            peerWatchTimer = setInterval(() => {
+                if (appState.peerJoined && appState.lastPeerSeenAt > 0) {
+                    const silentMs = Date.now() - appState.lastPeerSeenAt;
+                    if (silentMs > 9000 && appState.peer.online) {
+                        appState.peer.online = false;
+                        updateConnectionStatusUI('Друг давно не отвечает...', 'bg-amber-400');
+                    }
+                }
+            }, 2000);
+        }
+
+        // Автовосстановление соединения на мобильных при возврате в браузер или смене сети
+        function recoverConnectionIfNeeded() {
+            if (appState.screen !== 'room' || !appState.roomCode) return;
+            writeLog('Возврат в активное состояние — проверяем связь...');
+            if (!mqttClient) {
+                connectToRoom(appState.roomCode, appState.isCreator);
+            } else if (mqttClient.disconnected) {
+                try {
+                    mqttClient.reconnect();
+                } catch (e) {
+                    connectToRoom(appState.roomCode, appState.isCreator);
+                }
+            } else if (mqttClient.connected) {
+                publishPacket({ type: 'hello' });
+            }
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                recoverConnectionIfNeeded();
+            } else if (appState.screen === 'room') {
+                writeLog('Вкладка свёрнута — держим сессию...');
+            }
+        });
+
+        window.addEventListener('pageshow', () => {
+            recoverConnectionIfNeeded();
+        });
+
+        window.addEventListener('online', () => {
+            showToast('🌐 Интернет восстановлен');
+            recoverConnectionIfNeeded();
+        });
+
+        // =========================================================================
+        // 4. ИНТЕРФЕЙС ЛОББИ И КОМНАТЫ
+        // =========================================================================
+        document.querySelectorAll('.color-opt').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.color-opt').forEach((b) => {
+                    b.classList.remove('ring-2', 'ring-white', 'scale-105');
+                    b.classList.add('opacity-75');
+                });
+                btn.classList.remove('opacity-75');
+                btn.classList.add('ring-2', 'ring-white', 'scale-105');
+                appState.myColor = btn.dataset.color;
+            });
+        });
+
+        function readProfileFromInputs() {
+            const nick = (document.getElementById('inputNick').value || '').trim();
+            appState.myNick = (nick || 'Игрок').slice(0, 16);
+        }
+
+        function enterRoomScreen(code, isCreator) {
+            readProfileFromInputs();
+            appState.screen = 'room';
+            appState.me.x = isCreator ? Math.max(80, canvas.width * 0.35) : Math.max(80, canvas.width * 0.65);
+            appState.me.y = Math.max(120, canvas.height * 0.5);
+            appState.peer.x = isCreator ? Math.max(80, canvas.width * 0.65) : Math.max(80, canvas.width * 0.35);
+            appState.peer.y = Math.max(120, canvas.height * 0.5);
+            appState.peer.targetX = appState.peer.x;
+            appState.peer.targetY = appState.peer.y;
+            document.getElementById('chatMessages').innerHTML = '';
+
+            document.getElementById('lobbyScreen').classList.add('hidden');
+            document.getElementById('roomTopBar').classList.remove('hidden');
+            document.getElementById('roomBottomBar').classList.remove('hidden');
+
+            connectToRoom(code, isCreator);
+        }
+
+        document.getElementById('btnCreateRoom').addEventListener('click', () => {
+            readProfileFromInputs();
+            const code = generateCode4();
+            document.getElementById('createdCodeValue').textContent = code;
+            document.getElementById('createdCodeBox').classList.remove('hidden');
+            document.getElementById('inputRoomCode').value = code;
+            showToast(`Комната ${code} готова!`);
+            writeLog(`Сгенерирован код комнаты: ${code}`, 'ok');
+        });
+
+        document.getElementById('btnEnterCreatedRoom').addEventListener('click', () => {
+            const code = document.getElementById('createdCodeValue').textContent.trim();
+            enterRoomScreen(code, true);
+        });
+
+        document.getElementById('btnCopyCreated').addEventListener('click', () => {
+            const code = document.getElementById('createdCodeValue').textContent.trim();
+            copyToClipboard(code, `Код ${code} скопирован`);
+        });
+
+        document.getElementById('btnCopyRoomCode').addEventListener('click', () => {
+            copyToClipboard(appState.roomCode, `Код ${appState.roomCode} скопирован`);
+        });
+
+        document.getElementById('btnShareCreated').addEventListener('click', async () => {
+            const code = document.getElementById('createdCodeValue').textContent.trim();
+            const shareData = {
+                title: 'Тест комнаты',
+                text: `Заходи в тестовую комнату по коду: ${code}`,
+                url: window.location.href
+            };
+            if (navigator.share) {
+                try {
+                    await navigator.share(shareData);
+                } catch (e) {}
+            } else {
+                copyToClipboard(`Код комнаты: ${code}`, 'Текст приглашения скопирован');
+            }
+        });
+
+        document.getElementById('btnJoinRoom').addEventListener('click', () => {
+            const code = document.getElementById('inputRoomCode').value.trim().toUpperCase();
+            if (code.length < 3) {
+                showToast('Введите код комнаты');
+                return;
+            }
+            enterRoomScreen(code, false);
+        });
+
+        document.getElementById('btnExitRoom').addEventListener('click', () => {
+            disconnectMqtt(true);
+            appState.screen = 'lobby';
+            appState.peerJoined = false;
+            document.getElementById('roomTopBar').classList.add('hidden');
+            document.getElementById('roomBottomBar').classList.add('hidden');
+            document.getElementById('debugDrawer').classList.add('hidden');
+            document.getElementById('lobbyScreen').classList.remove('hidden');
+            updateConnectionStatusUI('Отключено', 'bg-slate-500');
+        });
+
+        function copyToClipboard(text, toastMsg) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => showToast(toastMsg)).catch(() => fallbackCopy(text, toastMsg));
+            } else {
+                fallbackCopy(text, toastMsg);
+            }
+        }
+
+        function fallbackCopy(text, toastMsg) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+            showToast(toastMsg);
+        }
+
+        // Лог и чат
+        document.getElementById('btnToggleDebug').addEventListener('click', () => {
+            document.getElementById('debugDrawer').classList.toggle('hidden');
+        });
+        document.getElementById('btnLobbyLog').addEventListener('click', () => {
+            document.getElementById('debugDrawer').classList.toggle('hidden');
+        });
+        document.getElementById('btnClearLog').addEventListener('click', () => {
+            document.getElementById('debugLogList').innerHTML = '';
+        });
+
+        function appendChatLine(author, text, color) {
+            const box = document.getElementById('chatMessages');
+            const line = document.createElement('div');
+            line.className = 'bg-slate-900/90 border border-white/10 rounded-xl px-2.5 py-1 text-xs shadow self-start';
+            line.innerHTML = `<span class="font-bold" style="color:${color}">${escapeHtml(author)}:</span> <span class="text-slate-100">${escapeHtml(text)}</span>`;
+            box.appendChild(line);
+            if (box.children.length > 6) {
+                box.removeChild(box.firstChild);
+            }
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/[&<>"']/g, (m) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[m]));
+        }
+
+        function addPopup(x, y, text, color) {
+            appState.popups.push({ x, y, text, color, life: 1.3 });
+        }
+
+        function sendMeow() {
+            appState.me.meowAnim = 1.0;
+            addPopup(appState.me.x, appState.me.y - 42, 'МЯУ! 🐾', appState.myColor);
+            appendChatLine(appState.myNick, '🐱 МЯУ!', appState.myColor);
+            publishPacket({ type: 'meow' });
+        }
+
+        function sendChatText() {
+            const inp = document.getElementById('chatInput');
+            const text = inp.value.trim();
+            if (!text) return;
+            inp.value = '';
+            appendChatLine(appState.myNick, text, appState.myColor);
+            addPopup(appState.me.x, appState.me.y - 42, text.slice(0, 22), '#f8fafc');
+            publishPacket({ type: 'chat', text });
+        }
+
+        document.getElementById('btnMeowAction').addEventListener('click', sendMeow);
+        document.getElementById('btnSendChat').addEventListener('click', sendChatText);
+        document.getElementById('chatInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') sendChatText();
+        });
+
+        // =========================================================================
+        // 5. УПРАВЛЕНИЕ (КЛАВИАТУРА + ДЖОЙСТИК)
+        // =========================================================================
+        const pressedKeys = {};
+        window.addEventListener('keydown', (e) => {
+            if (document.activeElement === document.getElementById('chatInput')) return;
+            pressedKeys[e.code] = true;
+            if (appState.screen === 'room' && e.code === 'Space') {
+                e.preventDefault();
+                sendMeow();
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            pressedKeys[e.code] = false;
+        });
+
+        const joyBase = document.getElementById('joyBase');
+        const joyStick = document.getElementById('joyStick');
+        let joyVec = { x: 0, y: 0 };
+        let activeJoyTouchId = null;
+
+        function setJoyFromTouch(touch) {
+            const rect = joyBase.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let dx = touch.clientX - cx;
+            let dy = touch.clientY - cy;
+            const maxOffset = 36;
+            const dist = Math.hypot(dx, dy);
+            if (dist > maxOffset) {
+                dx = (dx / dist) * maxOffset;
+                dy = (dy / dist) * maxOffset;
+            }
+            joyStick.style.transform = `translate(${dx}px, ${dy}px)`;
+            joyVec.x = dx / maxOffset;
+            joyVec.y = dy / maxOffset;
+        }
+
+        joyBase.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            activeJoyTouchId = t.identifier;
+            setJoyFromTouch(t);
+        });
+        joyBase.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) {
+                if (t.identifier === activeJoyTouchId) setJoyFromTouch(t);
+            }
+        });
+        const releaseJoy = (e) => {
+            for (const t of e.changedTouches) {
+                if (t.identifier === activeJoyTouchId) {
+                    activeJoyTouchId = null;
+                    joyVec.x = 0;
+                    joyVec.y = 0;
+                    joyStick.style.transform = 'translate(0px, 0px)';
+                }
+            }
+        };
+        joyBase.addEventListener('touchend', releaseJoy);
+        joyBase.addEventListener('touchcancel', releaseJoy);
+
+        // =========================================================================
+        // 6. ХОЛСТ, ИНТЕРПОЛЯЦИЯ И ОТРИСОВКА
+        // =========================================================================
+        const canvas = document.getElementById('arenaCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function fitCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            appState.me.x = Math.max(36, Math.min(canvas.width - 36, appState.me.x));
+            appState.me.y = Math.max(36, Math.min(canvas.height - 36, appState.me.y));
+        }
+        window.addEventListener('resize', fitCanvas);
+        fitCanvas();
+
+        function stepSimulation(dt) {
+            if (appState.screen !== 'room') return;
+
+            let mx = joyVec.x;
+            let my = joyVec.y;
+            if (document.activeElement !== document.getElementById('chatInput')) {
+                if (pressedKeys['KeyW'] || pressedKeys['ArrowUp']) my -= 1;
+                if (pressedKeys['KeyS'] || pressedKeys['ArrowDown']) my += 1;
+                if (pressedKeys['KeyA'] || pressedKeys['ArrowLeft']) mx -= 1;
+                if (pressedKeys['KeyD'] || pressedKeys['ArrowRight']) mx += 1;
+            }
+            const len = Math.hypot(mx, my);
+            if (len > 1) {
+                mx /= len;
+                my /= len;
+            }
+
+            const speed = 250;
+            appState.me.x += mx * speed * dt;
+            appState.me.y += my * speed * dt;
+            appState.me.x = Math.max(36, Math.min(canvas.width - 36, appState.me.x));
+            appState.me.y = Math.max(36, Math.min(canvas.height - 36, appState.me.y));
+
+            if (appState.me.meowAnim > 0) {
+                appState.me.meowAnim = Math.max(0, appState.me.meowAnim - dt * 1.4);
+            }
+
+            // Плавная интерполяция позиции второго игрока
+            if (appState.peerJoined) {
+                const lerpFactor = Math.min(1, dt * 14);
+                appState.peer.x += (appState.peer.targetX - appState.peer.x) * lerpFactor;
+                appState.peer.y += (appState.peer.targetY - appState.peer.y) * lerpFactor;
+            }
+            if (appState.peer.meowAnim > 0) {
+                appState.peer.meowAnim = Math.max(0, appState.peer.meowAnim - dt * 1.4);
+            }
+
+            for (let i = appState.popups.length - 1; i >= 0; i--) {
+                const p = appState.popups[i];
+                p.y -= 28 * dt;
+                p.life -= dt;
+                if (p.life <= 0) appState.popups.splice(i, 1);
+            }
+        }
+
+        function drawPlayerCircle(x, y, color, label, isSelf, meowAnim) {
+            ctx.save();
+
+            // Кольцо при нажатии "Мяу!"
+            if (meowAnim > 0) {
+                const radius = 26 + (1 - meowAnim) * 58;
+                ctx.strokeStyle = color;
+                ctx.globalAlpha = meowAnim * 0.85;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+
+            // Тень
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.beginPath();
+            ctx.arc(x, y + 5, 23, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Основной круг игрока
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, 22, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.lineWidth = isSelf ? 3.5 : 2.5;
+            ctx.strokeStyle = isSelf ? '#ffffff' : '#0f172a';
+            ctx.stroke();
+
+            // Простые ушки для наглядности
+            ctx.fillStyle = color;
+            [-1, 1].forEach((side) => {
+                ctx.beginPath();
+                ctx.moveTo(x + side * 8, y - 16);
+                ctx.lineTo(x + side * 16, y - 28);
+                ctx.lineTo(x + side * 20, y - 12);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            // Подпись имени
+            ctx.font = 'bold 13px Rubik, sans-serif';
+            ctx.textAlign = 'center';
+            const tag = isSelf ? `${label} (ты)` : label;
+            const w = ctx.measureText(tag).width + 16;
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.beginPath();
+            ctx.roundRect(x - w / 2, y - 52, w, 20, 8);
+            ctx.fill();
+
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillText(tag, x, y - 38);
+
+            ctx.restore();
+        }
+
+        function drawGridBackground() {
+            ctx.fillStyle = '#0b1020';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const step = 48;
+            ctx.strokeStyle = 'rgba(148, 163, 184, 0.08)';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < canvas.width; x += step) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+            for (let y = 0; y < canvas.height; y += step) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+        }
+
+        function renderFrame() {
+            drawGridBackground();
+
+            if (appState.screen === 'room') {
+                if (appState.peerJoined) {
+                    drawPlayerCircle(
+                        appState.peer.x,
+                        appState.peer.y,
+                        appState.peer.color,
+                        appState.peer.nick,
+                        false,
+                        appState.peer.meowAnim
+                    );
+                }
+                drawPlayerCircle(
+                    appState.me.x,
+                    appState.me.y,
+                    appState.myColor,
+                    appState.myNick,
+                    true,
+                    appState.me.meowAnim
+                );
+
+                for (const p of appState.popups) {
+                    ctx.save();
+                    ctx.globalAlpha = Math.max(0, Math.min(1, p.life));
+                    ctx.font = 'bold 14px Rubik, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = p.color;
+                    ctx.fillText(p.text, p.x, p.y);
+                    ctx.restore();
+                }
+            }
+        }
+
+        let lastTs = performance.now();
+        function loop(now) {
+            const dt = Math.min(0.05, (now - lastTs) / 1000);
+            lastTs = now;
+            stepSimulation(dt);
+            renderFrame();
+            requestAnimationFrame(loop);
+        }
+
+        window.addEventListener('load', () => {
+            requestAnimationFrame(loop);
+        });
+    </script>
+</body>
+</html>
